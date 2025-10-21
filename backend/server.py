@@ -225,6 +225,47 @@ class PostUpdate(BaseModel):
     images: Optional[List[str]] = None
 class CommentCreate(BaseModel):
     content: str
+class PollVote(BaseModel):
+    option_index: int
+class SharePostRequest(BaseModel):
+    share_text: Optional[str] = ""
+class ReportContentRequest(BaseModel):
+    content_type: str
+    content_id: str
+    reason: str
+    description: Optional[str] = ""
+class ReviewReportRequest(BaseModel):
+    status: str = "reviewed"
+    action_taken: Optional[str] = ""
+    flag_content: Optional[bool] = False
+class ChallengeCreate(BaseModel):
+    title: str
+    description: Optional[str] = None
+    challenge_type: str
+    target_value: float
+    unit: Optional[str] = None
+    start_date: str
+    end_date: str
+    ngo_id: Optional[str] = None
+    is_global: bool = True
+    reward_points: int = 0
+    image_url: Optional[str] = None
+class ChallengeProgress(BaseModel):
+    contribution: float
+class ROICalcRequest(BaseModel):
+    calculation_type: str
+    ngo_id: Optional[str] = None
+    event_id: Optional[str] = None
+    investment_amount: float
+class PredictionGenerateRequest(BaseModel):
+    prediction_type: str
+    entity_id: Optional[str] = None
+    entity_type: str = "ngo"
+class SmartSearchRequest(BaseModel):
+    query: str
+class ImpactStorySource(BaseModel):
+    source_type: str
+    source_id: str
 class EventCreate(BaseModel):
     title: str
     description: str
@@ -444,6 +485,21 @@ async def get_current_user(request: Request, session_token: Optional[str] = Cook
     except Exception as e:
         logger.error(f"Error getting current user: {str(e)}")
         return None
+
+async def require_user(request: Request, session_token: Optional[str] = Cookie(None)) -> Dict[str, Any]:
+    """Require an authenticated user (via cookie or Authorization header)."""
+    user = await get_current_user(request, session_token)
+    if not user:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    return user
+
+async def require_admin(user: Dict[str, Any] = Depends(require_user)) -> Dict[str, Any]:
+    """Require an admin user."""
+    row = supabase.table('users').select('is_admin').eq('id', user['id']).execute()
+    if not row.data or not row.data[0].get('is_admin', False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return user
+
 async def ai_match_volunteer(application: Dict, event: Dict) -> float:
     """Use Gemini AI to match volunteer to event based on skills, interests, and experience"""
     try:
@@ -686,20 +742,20 @@ async def like_post(post_id: str, request: Request, session_token: Optional[str]
         logger.error(f"Like post error: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 @api_router.post("/posts/{post_id}/poll/vote")
-async def vote_on_poll(post_id: str, vote_data: dict, request: Request, session_token: Optional[str] = Cookie(None)):
+async def vote_on_poll(post_id: str, vote: PollVote, user: Dict[str, Any] = Depends(require_user)):
     """Vote on a poll"""
-    user = await get_current_user(request, session_token)
-    if not user:
-        raise HTTPException(status_code=401, detail="Not authenticated")
     try:
-        option_index = vote_data.get('option_index')
+        option_index = vote.option_index
         if option_index is None:
             raise HTTPException(status_code=400, detail="option_index is required")
+
         post = supabase.table('posts').select('*').eq('id', post_id).execute()
         if not post.data or not post.data[0].get('poll'):
             raise HTTPException(status_code=404, detail="Poll not found")
+
         poll = post.data[0]['poll']
         existing_vote = supabase.table('poll_votes').select('*').eq('post_id', post_id).eq('user_id', user['id']).execute()
+
         if existing_vote.data and len(existing_vote.data) > 0:
             old_option = existing_vote.data[0]['option_index']
             if old_option != option_index:
@@ -718,6 +774,7 @@ async def vote_on_poll(post_id: str, vote_data: dict, request: Request, session_
                 'created_at': datetime.now(timezone.utc).isoformat()
             }
             supabase.table('poll_votes').insert(vote_record).execute()
+
         supabase.table('posts').update({'poll': poll}).eq('id', post_id).execute()
         return {'success': True, 'poll': poll}
     except HTTPException:
@@ -2436,13 +2493,11 @@ async def get_user_following(user_id: str, limit: int = 50):
         logger.error(f"Get following error: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 @api_router.post("/posts/{post_id}/share")
-async def share_post(post_id: str, request: Request, session_token: Optional[str] = Cookie(None)):
+async def share_post(post_id: str, body: SharePostRequest, user: Dict[str, Any] = Depends(require_user)):
     """Share a post"""
     try:
-        user_data = await get_current_user(session_token)
-        user_id = user_data['id']
-        body = await request.json()
-        share_text = body.get('share_text', '')
+        user_id = user['id']
+        share_text = body.share_text or ''
         share_data = {
             'id': str(uuid.uuid4()),
             'post_id': post_id,
@@ -2451,23 +2506,26 @@ async def share_post(post_id: str, request: Request, session_token: Optional[str
             'created_at': datetime.now(timezone.utc).isoformat()
         }
         supabase.table('post_shares').insert(share_data).execute()
+
         post = supabase.table('posts').select('shares_count, user_id').eq('id', post_id).execute()
         if post.data:
             new_count = post.data[0].get('shares_count', 0) + 1
             supabase.table('posts').update({'shares_count': new_count}).eq('id', post_id).execute()
+
             if post.data[0].get('user_id') != user_id:
                 notification_data = {
                     'id': str(uuid.uuid4()),
                     'user_id': post.data[0]['user_id'],
                     'type': 'post_share',
                     'title': 'Post Shared',
-                    'message': f"{user_data['name']} shared your post",
+                    'message': f"{user['name']} shared your post",
                     'link': f"/post/{post_id}",
                     'data': {'post_id': post_id, 'sharer_id': user_id},
                     'read': False,
                     'created_at': datetime.now(timezone.utc).isoformat()
                 }
                 supabase.table('notifications').insert(notification_data).execute()
+
         return {'message': 'Post shared successfully', 'share_id': share_data['id']}
     except Exception as e:
         logger.error(f"Share post error: {str(e)}")
@@ -2482,12 +2540,10 @@ async def get_post_shares(post_id: str, limit: int = 50):
         logger.error(f"Get shares error: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 @api_router.get("/notifications")
-async def get_notifications(request: Request, session_token: Optional[str] = Cookie(None), limit: int = 50, unread_only: bool = False):
+async def get_notifications(user: Dict[str, Any] = Depends(require_user), limit: int = 50, unread_only: bool = False):
     """Get user notifications"""
     try:
-        user_data = await get_current_user(session_token)
-        user_id = user_data['id']
-        query = supabase.table('notifications').select('*').eq('user_id', user_id)
+        query = supabase.table('notifications').select('*').eq('user_id', user['id'])
         if unread_only:
             query = query.eq('read', False)
         notifications = query.order('created_at', desc=True).limit(limit).execute()
@@ -2495,44 +2551,46 @@ async def get_notifications(request: Request, session_token: Optional[str] = Coo
     except Exception as e:
         logger.error(f"Get notifications error: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
 @api_router.put("/notifications/{notification_id}/read")
-async def mark_notification_read(notification_id: str, request: Request, session_token: Optional[str] = Cookie(None)):
+async def mark_notification_read(notification_id: str, user: Dict[str, Any] = Depends(require_user)):
     """Mark a notification as read"""
     try:
-        user_data = await get_current_user(session_token)
-        supabase.table('notifications').update({'read': True}).eq('id', notification_id).eq('user_id', user_data['id']).execute()
+        supabase.table('notifications').update({'read': True}).eq('id', notification_id).eq('user_id', user['id']).execute()
         return {'message': 'Notification marked as read'}
     except Exception as e:
         logger.error(f"Mark notification read error: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
 @api_router.put("/notifications/mark-all-read")
-async def mark_all_notifications_read(request: Request, session_token: Optional[str] = Cookie(None)):
+async def mark_all_notifications_read(user: Dict[str, Any] = Depends(require_user)):
     """Mark all notifications as read"""
     try:
-        user_data = await get_current_user(session_token)
-        user_id = user_data['id']
-        supabase.table('notifications').update({'read': True}).eq('user_id', user_id).eq('read', False).execute()
+        supabase.table('notifications').update({'read': True}).eq('user_id', user['id']).eq('read', False).execute()
         return {'message': 'All notifications marked as read'}
     except Exception as e:
         logger.error(f"Mark all read error: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
 @api_router.get("/notifications/unread-count")
-async def get_unread_count(request: Request, session_token: Optional[str] = Cookie(None)):
+async def get_unread_count(user: Dict[str, Any] = Depends(require_user)):
     """Get count of unread notifications"""
     try:
-        user_data = await get_current_user(session_token)
-        user_id = user_data['id']
-        result = supabase.table('notifications').select('id', count='exact').eq('user_id', user_id).eq('read', False).execute()
+        result = supabase.table('notifications').select('id', count='exact').eq('user_id', user['id']).eq('read', False).execute()
         return {'count': result.count if result.count else 0}
     except Exception as e:
         logger.error(f"Get unread count error: {str(e)}")
         return {'count': 0}
+
+
 @api_router.delete("/notifications/{notification_id}")
-async def delete_notification(notification_id: str, request: Request, session_token: Optional[str] = Cookie(None)):
+async def delete_notification(notification_id: str, user: Dict[str, Any] = Depends(require_user)):
     """Delete a notification"""
     try:
-        user_data = await get_current_user(session_token)
-        supabase.table('notifications').delete().eq('id', notification_id).eq('user_id', user_data['id']).execute()
+        supabase.table('notifications').delete().eq('id', notification_id).eq('user_id', user['id']).execute()
         return {'message': 'Notification deleted'}
     except Exception as e:
         logger.error(f"Delete notification error: {str(e)}")
@@ -2563,13 +2621,9 @@ async def get_trending_posts(limit: int = 20):
         except:
             return []
 @api_router.post("/trending/update")
-async def update_trending(request: Request, session_token: Optional[str] = Cookie(None)):
+async def update_trending(user: Dict[str, Any] = Depends(require_admin)):
     """Update trending posts (admin only)"""
     try:
-        user_data = await get_current_user(session_token)
-        user = supabase.table('users').select('is_admin').eq('id', user_data['id']).execute()
-        if not user.data or not user.data[0].get('is_admin', False):
-            raise HTTPException(status_code=403, detail="Admin access required")
         seven_days_ago = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
         posts = supabase.table('posts').select('*').eq('is_flagged', False).gte('created_at', seven_days_ago).execute()
         trending_data = []
@@ -2626,18 +2680,16 @@ async def get_trending_ngos(limit: int = 10):
         except:
             return []
 @api_router.post("/admin/reports")
-async def report_content(request: Request, session_token: Optional[str] = Cookie(None)):
+async def report_content(body: ReportContentRequest, user: Dict[str, Any] = Depends(require_user)):
     """Report content for moderation"""
     try:
-        user_data = await get_current_user(session_token)
-        body = await request.json()
         report_data = {
             'id': str(uuid.uuid4()),
-            'reporter_id': user_data['id'],
-            'content_type': body.get('content_type'),
-            'content_id': body.get('content_id'),
-            'reason': body.get('reason'),
-            'description': body.get('description', ''),
+            'reporter_id': user['id'],
+            'content_type': body.content_type,
+            'content_id': body.content_id,
+            'reason': body.reason,
+            'description': body.description or '',
             'status': 'pending',
             'created_at': datetime.now(timezone.utc).isoformat()
         }
@@ -2646,41 +2698,35 @@ async def report_content(request: Request, session_token: Optional[str] = Cookie
     except Exception as e:
         logger.error(f"Report content error: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
 @api_router.get("/admin/reports")
-async def get_reports(request: Request, session_token: Optional[str] = Cookie(None), status: str = 'pending', limit: int = 50):
+async def get_reports(status: str = 'pending', limit: int = 50, user: Dict[str, Any] = Depends(require_admin)):
     """Get content reports (admin only)"""
     try:
-        user_data = await get_current_user(session_token)
-        user = supabase.table('users').select('is_admin').eq('id', user_data['id']).execute()
-        if not user.data or not user.data[0].get('is_admin', False):
-            raise HTTPException(status_code=403, detail="Admin access required")
         query = supabase.table('content_reports').select('*, users!content_reports_reporter_id_fkey(name, email)')
         if status != 'all':
             query = query.eq('status', status)
         reports = query.order('created_at', desc=True).limit(limit).execute()
         return reports.data
-    except HTTPException:
-        raise
     except Exception as e:
         logger.error(f"Get reports error: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
 @api_router.put("/admin/reports/{report_id}")
-async def review_report(report_id: str, request: Request, session_token: Optional[str] = Cookie(None)):
+async def review_report(report_id: str, body: ReviewReportRequest, user: Dict[str, Any] = Depends(require_admin)):
     """Review a content report (admin only)"""
     try:
-        user_data = await get_current_user(session_token)
-        user = supabase.table('users').select('is_admin').eq('id', user_data['id']).execute()
-        if not user.data or not user.data[0].get('is_admin', False):
-            raise HTTPException(status_code=403, detail="Admin access required")
-        body = await request.json()
         update_data = {
-            'status': body.get('status', 'reviewed'),
-            'action_taken': body.get('action_taken', ''),
-            'reviewed_by': user_data['id'],
+            'status': body.status,
+            'action_taken': body.action_taken or '',
+            'reviewed_by': user['id'],
             'reviewed_at': datetime.now(timezone.utc).isoformat()
         }
         supabase.table('content_reports').update(update_data).eq('id', report_id).execute()
-        if body.get('flag_content'):
+
+        if body.flag_content:
             report = supabase.table('content_reports').select('content_type, content_id').eq('id', report_id).execute()
             if report.data:
                 content_type = report.data[0]['content_type']
@@ -2688,55 +2734,40 @@ async def review_report(report_id: str, request: Request, session_token: Optiona
                 if content_type == 'post':
                     supabase.table('posts').update({'is_flagged': True}).eq('id', content_id).execute()
         return {'message': 'Report reviewed successfully'}
-    except HTTPException:
-        raise
     except Exception as e:
         logger.error(f"Review report error: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 @api_router.get("/admin/users")
-async def get_all_users(request: Request, session_token: Optional[str] = Cookie(None), limit: int = 50, search: str = ''):
+async def get_all_users(limit: int = 50, search: str = '', user: Dict[str, Any] = Depends(require_admin)):
     """Get all users (admin only)"""
     try:
-        user_data = await get_current_user(session_token)
-        user = supabase.table('users').select('is_admin').eq('id', user_data['id']).execute()
-        if not user.data or not user.data[0].get('is_admin', False):
-            raise HTTPException(status_code=403, detail="Admin access required")
         query = supabase.table('users').select('id, name, email, user_type, created_at, is_banned, is_admin')
         if search:
             query = query.or_(f"name.ilike.%{search}%,email.ilike.%{search}%")
         users = query.order('created_at', desc=True).limit(limit).execute()
         return users.data
-    except HTTPException:
-        raise
     except Exception as e:
         logger.error(f"Get users error: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
 @api_router.put("/admin/users/{user_id}/ban")
-async def ban_user(user_id: str, request: Request, session_token: Optional[str] = Cookie(None)):
+async def ban_user(user_id: str, body: Dict[str, Any], user: Dict[str, Any] = Depends(require_admin)):
     """Ban/unban a user (admin only)"""
     try:
-        user_data = await get_current_user(session_token)
-        user = supabase.table('users').select('is_admin').eq('id', user_data['id']).execute()
-        if not user.data or not user.data[0].get('is_admin', False):
-            raise HTTPException(status_code=403, detail="Admin access required")
-        body = await request.json()
         is_banned = body.get('is_banned', True)
         supabase.table('users').update({'is_banned': is_banned}).eq('id', user_id).execute()
         action = 'banned' if is_banned else 'unbanned'
         return {'message': f'User {action} successfully'}
-    except HTTPException:
-        raise
     except Exception as e:
         logger.error(f"Ban user error: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
 @api_router.get("/admin/stats")
-async def get_admin_stats(request: Request, session_token: Optional[str] = Cookie(None)):
+async def get_admin_stats(user: Dict[str, Any] = Depends(require_admin)):
     """Get platform statistics (admin only)"""
     try:
-        user_data = await get_current_user(session_token)
-        user = supabase.table('users').select('is_admin').eq('id', user_data['id']).execute()
-        if not user.data or not user.data[0].get('is_admin', False):
-            raise HTTPException(status_code=403, detail="Admin access required")
         users_count = supabase.table('users').select('id', count='exact').execute()
         ngos_count = supabase.table('ngos').select('id', count='exact').execute()
         posts_count = supabase.table('posts').select('id', count='exact').execute()
@@ -2754,8 +2785,6 @@ async def get_admin_stats(request: Request, session_token: Optional[str] = Cooki
             'new_users_30d': new_users.count or 0,
             'new_posts_30d': new_posts.count or 0
         }
-    except HTTPException:
-        raise
     except Exception as e:
         logger.error(f"Get admin stats error: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -3187,34 +3216,33 @@ async def get_leaderboards(
         logger.error(f"Get leaderboards error: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 @api_router.post("/gamification/leaderboards/update")
-async def update_leaderboard(
-    request: Request,
-    session_token: Optional[str] = Cookie(None)
-):
+async def update_leaderboard(user: Dict[str, Any] = Depends(require_user)):
     """Recalculate and update leaderboard rankings"""
     try:
-        current_user = await get_current_user(session_token)
         hours_result = supabase.table('volunteer_hours').select('user_id, hours').execute()
         user_hours = {}
         for record in hours_result.data:
-            user_id = record['user_id']
-            user_hours[user_id] = user_hours.get(user_id, 0) + float(record.get('hours', 0))
-        for user_id, total_hours in user_hours.items():
+            uid = record['user_id']
+            user_hours[uid] = user_hours.get(uid, 0) + float(record.get('hours', 0))
+        for uid, total_hours in user_hours.items():
             supabase.table('leaderboards').upsert({
-                'user_id': user_id,
+                'user_id': uid,
                 'category': 'volunteer',
                 'metric_type': 'hours',
                 'total_value': total_hours,
                 'last_updated': datetime.now(timezone.utc).isoformat()
             }, on_conflict='user_id,category,metric_type').execute()
+
         donations_result = supabase.table('donations').select('user_id, amount').eq('status', 'succeeded').execute()
         user_donations = {}
         for record in donations_result.data:
-            user_id = record['user_id']
-            user_donations[user_id] = user_donations.get(user_id, 0) + float(record.get('amount', 0))
-        for user_id, total_amount in user_donations.items():
+            uid = record.get('user_id')
+            if not uid:
+                continue
+            user_donations[uid] = user_donations.get(uid, 0) + float(record.get('amount', 0))
+        for uid, total_amount in user_donations.items():
             supabase.table('leaderboards').upsert({
-                'user_id': user_id,
+                'user_id': uid,
                 'category': 'donor',
                 'metric_type': 'donations',
                 'total_value': total_amount,
@@ -3224,6 +3252,7 @@ async def update_leaderboard(
     except Exception as e:
         logger.error(f"Update leaderboards error: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
 @api_router.get("/gamification/badges")
 async def get_all_badges():
     """Get all available badges"""
@@ -3233,39 +3262,27 @@ async def get_all_badges():
     except Exception as e:
         logger.error(f"Get badges error: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
-@api_router.get("/gamification/user-badges/{user_id}")
-async def get_user_badges(user_id: str):
-    """Get badges earned by a user"""
-    try:
-        result = supabase.table('user_badges').select('*, badge:badges(*)').eq('user_id', user_id).execute()
-        return {'user_badges': result.data}
-    except Exception as e:
-        logger.error(f"Get user badges error: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
 @api_router.post("/gamification/award-badge")
-async def award_badge(
-    request: Request,
-    session_token: Optional[str] = Cookie(None)
-):
+async def award_badge(request: Request, user: Dict[str, Any] = Depends(require_user)):
     """Award a badge to a user"""
     try:
-        current_user = await get_current_user(session_token)
         data = await request.json()
-        user_id = data.get('user_id')
+        target_user_id = data.get('user_id')
         badge_id = data.get('badge_id')
-        existing = supabase.table('user_badges').select('*').eq('user_id', user_id).eq('badge_id', badge_id).execute()
+        existing = supabase.table('user_badges').select('*').eq('user_id', target_user_id).eq('badge_id', badge_id).execute()
         if existing.data:
             return {'success': False, 'message': 'Badge already earned'}
         result = supabase.table('user_badges').insert({
-            'user_id': user_id,
+            'user_id': target_user_id,
             'badge_id': badge_id,
             'earned_at': datetime.now(timezone.utc).isoformat()
         }).execute()
-        await notify_user(user_id, 'badge_earned', {'badge_id': badge_id})
+        await notify_user(target_user_id, 'badge_earned', {'badge_id': badge_id})
         return {'success': True, 'user_badge': result.data[0]}
     except Exception as e:
         logger.error(f"Award badge error: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
 @api_router.get("/gamification/challenges")
 async def get_challenges(
     status: str = 'active',
@@ -3285,124 +3302,54 @@ async def get_challenges(
         logger.error(f"Get challenges error: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 @api_router.post("/gamification/challenges")
-async def create_challenge(
-    request: Request,
-    session_token: Optional[str] = Cookie(None)
-):
+async def create_challenge(body: ChallengeCreate, user: Dict[str, Any] = Depends(require_user)):
     """Create a new challenge"""
     try:
-        current_user = await get_current_user(session_token)
-        data = await request.json()
         challenge_data = {
             'id': str(uuid.uuid4()),
-            'title': data['title'],
-            'description': data.get('description'),
-            'challenge_type': data['challenge_type'],
-            'target_value': data['target_value'],
-            'unit': data.get('unit'),
-            'start_date': data['start_date'],
-            'end_date': data['end_date'],
-            'created_by': current_user['id'],
-            'ngo_id': data.get('ngo_id'),
-            'is_global': data.get('is_global', True),
-            'reward_points': data.get('reward_points', 0),
-            'image_url': data.get('image_url'),
+            'title': body.title,
+            'description': body.description,
+            'challenge_type': body.challenge_type,
+            'target_value': body.target_value,
+            'unit': body.unit,
+            'start_date': body.start_date,
+            'end_date': body.end_date,
+            'created_by': user['id'],
+            'ngo_id': body.ngo_id,
+            'is_global': body.is_global,
+            'reward_points': body.reward_points,
+            'image_url': body.image_url,
             'created_at': datetime.now(timezone.utc).isoformat()
         }
         result = supabase.table('challenges').insert(challenge_data).execute()
-        await manager.broadcast({
-            'type': 'new_challenge',
-            'challenge': result.data[0]
-        })
+        await manager.broadcast({'type': 'new_challenge', 'challenge': result.data[0]})
         return {'success': True, 'challenge': result.data[0]}
     except Exception as e:
         logger.error(f"Create challenge error: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
 @api_router.post("/gamification/challenges/{challenge_id}/join")
-async def join_challenge(
-    challenge_id: str,
-    request: Request,
-    session_token: Optional[str] = Cookie(None)
-):
+async def join_challenge(challenge_id: str, user: Dict[str, Any] = Depends(require_user)):
     """Join a challenge"""
     try:
-        current_user = await get_current_user(session_token)
-        existing = supabase.table('challenge_participants').select('*').eq('challenge_id', challenge_id).eq('user_id', current_user['id']).execute()
+        existing = supabase.table('challenge_participants').select('*').eq('challenge_id', challenge_id).eq('user_id', user['id']).execute()
         if existing.data:
             return {'success': False, 'message': 'Already joined this challenge'}
         result = supabase.table('challenge_participants').insert({
             'id': str(uuid.uuid4()),
             'challenge_id': challenge_id,
-            'user_id': current_user['id'],
+            'user_id': user['id'],
             'joined_at': datetime.now(timezone.utc).isoformat()
         }).execute()
         supabase.rpc('increment_challenge_participants', {'challenge_id': challenge_id}).execute()
-        return {'success': True, 'participation': result.data[0]}
-    except Exception as e:
-        logger.error(f"Join challenge error: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-@api_router.post("/gamification/challenges/{challenge_id}/progress")
-async def update_challenge_progress(
-    challenge_id: str,
-    request: Request,
-    session_token: Optional[str] = Cookie(None)
-):
-    """Update user's progress in a challenge"""
-    try:
-        current_user = await get_current_user(session_token)
-        data = await request.json()
-        contribution = data.get('contribution', 0)
-        supabase.table('challenge_participants').update({
-            'contribution': contribution
-        }).eq('challenge_id', challenge_id).eq('user_id', current_user['id']).execute()
-        participants = supabase.table('challenge_participants').select('contribution').eq('challenge_id', challenge_id).execute()
-        total_contribution = sum(float(p.get('contribution', 0)) for p in participants.data)
-        challenge_result = supabase.table('challenges').update({
-            'current_value': total_contribution
-        }).eq('id', challenge_id).execute()
-        challenge = challenge_result.data[0] if challenge_result.data else {}
-        if total_contribution >= float(challenge.get('target_value', 0)):
-            supabase.table('challenges').update({
-                'status': 'completed'
-            }).eq('id', challenge_id).execute()
-            await manager.broadcast({
-                'type': 'challenge_completed',
-                'challenge_id': challenge_id
-            })
-        return {'success': True, 'current_value': total_contribution}
-    except Exception as e:
-        logger.error(f"Update challenge progress error: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-@api_router.get("/gamification/streaks/{user_id}")
-async def get_user_streak(user_id: str):
-    """Get user's activity streak"""
-    try:
-        result = supabase.table('activity_streaks').select('*').eq('user_id', user_id).execute()
-        if not result.data:
-            return {
-                'current_streak': 0,
-                'longest_streak': 0,
-                'last_activity_date': None,
-                'total_checkins': 0
-            }
-        return result.data[0]
-    except Exception as e:
-        logger.error(f"Get streak error: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-@api_router.post("/gamification/streaks/checkin")
-async def checkin_streak(
-    request: Request,
-    session_token: Optional[str] = Cookie(None)
-):
     """Check in for daily streak"""
     try:
-        current_user = await get_current_user(session_token)
         today = datetime.now(timezone.utc).date()
-        result = supabase.table('activity_streaks').select('*').eq('user_id', current_user['id']).execute()
+        result = supabase.table('activity_streaks').select('*').eq('user_id', user['id']).execute()
         if not result.data:
             new_streak = {
                 'id': str(uuid.uuid4()),
-                'user_id': current_user['id'],
+                'user_id': user['id'],
                 'current_streak': 1,
                 'longest_streak': 1,
                 'last_activity_date': today.isoformat(),
@@ -3417,10 +3364,7 @@ async def checkin_streak(
         if last_date == today:
             return {'success': False, 'message': 'Already checked in today', 'streak': streak_data}
         days_diff = (today - last_date).days
-        if days_diff == 1:
-            new_current = streak_data['current_streak'] + 1
-        else:
-            new_current = 1
+        new_current = streak_data['current_streak'] + 1 if days_diff == 1 else 1
         new_longest = max(new_current, streak_data['longest_streak'])
         updated = supabase.table('activity_streaks').update({
             'current_streak': new_current,
@@ -3428,155 +3372,27 @@ async def checkin_streak(
             'last_activity_date': today.isoformat(),
             'total_checkins': streak_data['total_checkins'] + 1,
             'updated_at': datetime.now(timezone.utc).isoformat()
-        }).eq('user_id', current_user['id']).execute()
+        }).eq('user_id', user['id']).execute()
         if new_current == 7:
-            await award_badge_by_name(current_user['id'], 'Week Warrior')
+            await award_badge_by_name(user['id'], 'Week Warrior')
         elif new_current == 30:
-            await award_badge_by_name(current_user['id'], 'Month Master')
+            await award_badge_by_name(user['id'], 'Month Master')
         return {'success': True, 'streak': updated.data[0]}
     except Exception as e:
         logger.error(f"Checkin streak error: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
-@api_router.get("/gamification/community-score")
-async def get_community_scores(
-    entity_type: str = 'user',
-    limit: int = 20
-):
-    """Get community scores leaderboard"""
-    try:
-        result = supabase.table('community_scores').select('*').eq('entity_type', entity_type).order('total_score', desc=True).limit(limit).execute()
-        enriched_data = []
-        for score in result.data:
-            if entity_type == 'user' and score.get('user_id'):
-                user_result = supabase.table('users').select('id, name, avatar').eq('id', score['user_id']).execute()
-                if user_result.data:
-                    score['user'] = user_result.data[0]
-            elif entity_type == 'ngo' and score.get('ngo_id'):
-                ngo_result = supabase.table('ngos').select('id, name, logo').eq('id', score['ngo_id']).execute()
-                if ngo_result.data:
-                    score['ngo'] = ngo_result.data[0]
-            enriched_data.append(score)
-        return {'community_scores': enriched_data}
-    except Exception as e:
-        logger.error(f"Get community scores error: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-@api_router.get("/realtime/counters")
-async def get_live_counters():
-    """Get live impact counters"""
-    try:
-        result = supabase.table('live_counters').select('*').execute()
-        counters = {}
-        for counter in result.data:
-            counters[counter['counter_name']] = {
-                'value': counter['counter_value'],
-                'type': counter['counter_type'],
-                'last_updated': counter['last_updated']
-            }
-        return {'counters': counters}
-    except Exception as e:
-        logger.error(f"Get live counters error: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-@api_router.post("/realtime/counters/increment")
-async def increment_counter(
-    request: Request,
-    session_token: Optional[str] = Cookie(None)
-):
-    """Increment a live counter"""
-    try:
-        data = await request.json()
-        counter_name = data['counter_name']
-        increment_by = data.get('increment_by', 1)
-        result = supabase.table('live_counters').select('*').eq('counter_name', counter_name).execute()
-        if result.data:
-            current_value = int(result.data[0]['counter_value'])
-            new_value = current_value + increment_by
-            supabase.table('live_counters').update({
-                'counter_value': new_value,
-                'last_updated': datetime.now(timezone.utc).isoformat()
-            }).eq('counter_name', counter_name).execute()
-        else:
-            new_value = increment_by
-            supabase.table('live_counters').insert({
-                'counter_name': counter_name,
-                'counter_value': new_value,
-                'last_updated': datetime.now(timezone.utc).isoformat()
-            }).execute()
-        await manager.broadcast({
-            'type': 'counter_update',
-            'counter_name': counter_name,
-            'value': new_value
-        })
-        return {'success': True, 'counter_name': counter_name, 'value': new_value}
-    except Exception as e:
-        logger.error(f"Increment counter error: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-@api_router.get("/realtime/impact-map")
-async def get_impact_map_data():
-    """Get data for interactive impact map"""
-    try:
-        result = supabase.table('impact_events').select('*').not_.is_('location_lat', 'null').not_.is_('location_lng', 'null').order('created_at', desc=True).limit(500).execute()
-        return {'impact_events': result.data}
-    except Exception as e:
-        logger.error(f"Get impact map data error: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-@api_router.get("/realtime/heatmap")
-async def get_impact_heatmap():
-    """Get impact heatmap data"""
-    try:
-        result = supabase.table('impact_heatmap').select('*').order('intensity', desc=True).limit(200).execute()
-        return {'heatmap_data': result.data}
-    except Exception as e:
-        logger.error(f"Get heatmap error: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-@api_router.get("/realtime/donation-ticker")
-async def get_donation_ticker(limit: int = 20):
-    """Get recent donations for live ticker"""
-    try:
-        result = supabase.table('donations').select('*, user:users(name, avatar), ngo:ngos(name)').eq('status', 'succeeded').order('created_at', desc=True).limit(limit).execute()
-        ticker_items = []
-        for donation in result.data:
-            ticker_items.append({
-                'id': donation['id'],
-                'amount': donation['amount'],
-                'currency': donation.get('currency', 'USD'),
-                'donor_name': donation.get('user', {}).get('name', 'Anonymous'),
-                'ngo_name': donation.get('ngo', {}).get('name', 'Unknown'),
-                'timestamp': donation['created_at']
-            })
-        return {'donations': ticker_items}
-    except Exception as e:
-        logger.error(f"Get donation ticker error: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-@api_router.get("/realtime/timeline")
-async def get_impact_timeline(
-    limit: int = 50,
-    event_type: Optional[str] = None
-):
-    """Get impact timeline events"""
-    try:
-        query = supabase.table('impact_events').select('*, user:users(name, avatar), ngo:ngos(name, logo)')
-        if event_type:
-            query = query.eq('event_type', event_type)
-        result = query.eq('is_public', True).order('created_at', desc=True).limit(limit).execute()
-        return {'timeline_events': result.data}
-    except Exception as e:
-        logger.error(f"Get timeline error: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+
 @api_router.post("/realtime/impact-event")
-async def create_impact_event(
-    request: Request,
-    session_token: Optional[str] = Cookie(None)
-):
+async def create_impact_event(body: Dict[str, Any], user: Dict[str, Any] = Depends(require_user)):
     """Create an impact event for timeline/map"""
     try:
-        current_user = await get_current_user(session_token)
-        data = await request.json()
+        data = body
         event_data = {
             'id': str(uuid.uuid4()),
             'event_type': data['event_type'],
             'title': data['title'],
             'description': data.get('description'),
-            'user_id': current_user['id'],
+            'user_id': user['id'],
             'ngo_id': data.get('ngo_id'),
             'event_id': data.get('event_id'),
             'impact_value': data.get('impact_value'),
@@ -3590,21 +3406,16 @@ async def create_impact_event(
             'created_at': datetime.now(timezone.utc).isoformat()
         }
         result = supabase.table('impact_events').insert(event_data).execute()
-        await manager.broadcast({
-            'type': 'new_impact_event',
-            'event': result.data[0]
-        })
+        await manager.broadcast({'type': 'new_impact_event', 'event': result.data[0]})
         if data.get('location_lat') and data.get('location_lng'):
             await update_heatmap(data['location_lat'], data['location_lng'], data.get('impact_value', 1))
         return {'success': True, 'impact_event': result.data[0]}
     except Exception as e:
         logger.error(f"Create impact event error: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
 @api_router.post("/analytics/roi-calculator")
-async def calculate_roi(
-    request: Request,
-    session_token: Optional[str] = Cookie(None)
-):
+async def calculate_roi(body: Dict[str, Any], user: Dict[str, Any] = Depends(require_user)):
     """Calculate ROI for an event or NGO"""
     try:
         current_user = await get_current_user(session_token)

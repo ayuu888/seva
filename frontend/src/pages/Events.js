@@ -42,9 +42,13 @@ const Events = () => {
     ngo_id: '',
     images: []
   });
+
   useEffect(() => {
     fetchEvents();
     fetchUserNGOs();
+    if (user) {
+      checkUserRegistrations();
+    }
     refreshIntervalRef.current = setInterval(() => {
       fetchEventsQuietly();
     }, 30000);
@@ -53,7 +57,8 @@ const Events = () => {
         clearInterval(refreshIntervalRef.current);
       }
     };
-  }, []);
+  }, [user]);
+
   const fetchEventsQuietly = async () => {
     try {
       const response = await axios.get(`${API}/events`);
@@ -61,27 +66,62 @@ const Events = () => {
     } catch (error) {
     }
   };
+
   const handleRefresh = async () => {
     setIsRefreshing(true);
     await fetchEvents();
     setIsRefreshing(false);
     toast.success('Events refreshed!');
   };
+
   const fetchEvents = async () => {
     try {
       const response = await axios.get(`${API}/events`);
-      setEvents(response.data.events || []);
+      const eventsData = response.data.events || [];
+
+      // Filter out events with invalid dates
+      const validEvents = eventsData.filter(event => {
+        if (!event.date) return false;
+        const eventDate = new Date(event.date);
+        return eventDate.getTime() > 0 && eventDate.getFullYear() > 1970;
+      });
+
+      setEvents(validEvents);
+
+      if (user) {
+        checkUserRegistrations();
+      }
     } catch (error) {
+      console.error('Failed to fetch events:', error);
+      toast.error('Failed to load events');
     }
   };
+
   const fetchUserNGOs = async () => {
+    if (!user) return;
     try {
       const response = await axios.get(`${API}/ngos`);
       const myNGOs = (response.data.ngos || []).filter(ngo => ngo.owner_id === user?.id);
       setUserNGOs(myNGOs);
     } catch (error) {
+      console.error('Failed to fetch NGOs:', error);
     }
   };
+
+  const checkUserRegistrations = async () => {
+    if (!user) return;
+    try {
+      // Check which events the user is registered for
+      const response = await axios.get(`${API}/events/my-registrations`);
+      if (response.data.registrations) {
+        const registeredEventIds = response.data.registrations.map(r => r.event_id);
+        setRegistrations(new Set(registeredEventIds));
+      }
+    } catch (error) {
+      console.error('Failed to check registrations:', error);
+    }
+  };
+
   const handleRSVP = async (eventId) => {
     try {
       const response = await axios.post(`${API}/events/${eventId}/rsvp`);
@@ -99,6 +139,7 @@ const Events = () => {
       toast.error('Failed to register');
     }
   };
+
   const handleCheckIn = async (eventId) => {
     try {
       await axios.post(`${API}/events/${eventId}/checkin`);
@@ -108,6 +149,7 @@ const Events = () => {
       toast.error(error.response?.data?.detail || 'Failed to check in');
     }
   };
+
   const handleCreateEvent = async (e) => {
     e.preventDefault();
     try {
@@ -120,6 +162,7 @@ const Events = () => {
       toast.error('Failed to create event');
     }
   };
+
   const handleUpdateEvent = async (e) => {
     e.preventDefault();
     try {
@@ -133,6 +176,7 @@ const Events = () => {
       toast.error('Failed to update event');
     }
   };
+
   const handleDeleteEvent = async (eventId) => {
     if (!window.confirm('Are you sure you want to delete this event?')) return;
     try {
@@ -143,6 +187,7 @@ const Events = () => {
       toast.error('Failed to delete event');
     }
   };
+
   const fetchAttendees = async (eventId) => {
     try {
       const response = await axios.get(`${API}/events/${eventId}/attendees`);
@@ -152,6 +197,7 @@ const Events = () => {
       toast.error('Failed to fetch attendees');
     }
   };
+
   const resetForm = () => {
     setEventForm({
       title: '',
@@ -166,6 +212,7 @@ const Events = () => {
       images: []
     });
   };
+
   const openEditDialog = (event) => {
     setSelectedEvent(event);
     setEventForm({
@@ -182,9 +229,11 @@ const Events = () => {
     });
     setEditDialogOpen(true);
   };
+
   const canManageEvent = (event) => {
     return user && event.owner_id === user.id;
   };
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-purple-50/50 via-blue-50/30 to-indigo-50/50 dark:from-slate-900 dark:via-purple-950/30 dark:to-slate-900">
       <Navigation />
@@ -263,11 +312,15 @@ const Events = () => {
                   <div className="space-y-2">
                     <div className="flex items-center gap-2 text-sm text-muted-foreground">
                       <Calendar className="h-4 w-4" />
-                      {format(new Date(event.date), 'PPP')}
+                      {event.date && new Date(event.date).getTime() > 0 
+                        ? format(new Date(event.date), 'PPP')
+                        : 'Date TBA'}
                     </div>
                     <div className="flex items-center gap-2 text-sm text-muted-foreground">
                       <Clock className="h-4 w-4" />
-                      {format(new Date(event.date), 'p')}
+                      {event.date && new Date(event.date).getTime() > 0 
+                        ? format(new Date(event.date), 'p')
+                        : 'Time TBA'}
                     </div>
                     <div className="flex items-center gap-2 text-sm text-muted-foreground">
                       <MapPin className="h-4 w-4" />

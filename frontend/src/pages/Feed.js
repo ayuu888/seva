@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
+import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import { API } from '../App';
 import { Navigation } from '../components/Navigation';
@@ -21,8 +22,15 @@ import { AnimatedLikeButton } from '../components/animations/AnimatedButtons';
 import { AnimatedCard, ScrollAnimation } from '../components/animations/AnimatedComponents';
 const Feed = () => {
   const { user } = useAuth();
+  const navigate = useNavigate();
   const [posts, setPosts] = useState([]);
   const [events, setEvents] = useState([]);
+  const [impactStats, setImpactStats] = useState({
+    volunteer_hours: 0,
+    events_attended: 0,
+    lives_impacted: 0
+  });
+  const [loadingImpact, setLoadingImpact] = useState(false);
   const [newPost, setNewPost] = useState('');
   const [postImages, setPostImages] = useState([]);
   const [showPollCreation, setShowPollCreation] = useState(false);
@@ -37,6 +45,9 @@ const Feed = () => {
   useEffect(() => {
     fetchPosts();
     fetchEvents();
+    if (user) {
+      fetchImpactStats();
+    }
     refreshIntervalRef.current = setInterval(() => {
       checkForNewPosts();
     }, 30000);
@@ -45,7 +56,7 @@ const Feed = () => {
         clearInterval(refreshIntervalRef.current);
       }
     };
-  }, []);
+  }, [user]);
   const checkForNewPosts = async () => {
     try {
       const response = await axios.get(`${API}/posts`);
@@ -63,6 +74,9 @@ const Feed = () => {
     setIsRefreshing(true);
     await fetchPosts();
     await fetchEvents();
+    if (user) {
+      await fetchImpactStats();
+    }
     setHasNewPosts(false);
     setIsRefreshing(false);
     toast.success('Feed refreshed!');
@@ -82,6 +96,30 @@ const Feed = () => {
       const response = await axios.get(`${API}/events?limit=5`);
       setEvents(response.data.events || []);
     } catch (error) {
+      console.error('Failed to fetch events:', error);
+    }
+  };
+
+  const fetchImpactStats = async () => {
+    if (!user?.id) return;
+    
+    try {
+      setLoadingImpact(true);
+      const response = await axios.get(`${API}/impact/dashboard/${user.id}`);
+      if (response.data) {
+        const metricsByType = response.data.metrics_by_type || {};
+        const livesImpacted = (metricsByType.people_helped && metricsByType.people_helped.total) || 0;
+        setImpactStats({
+          volunteer_hours: response.data.total_volunteer_hours || 0,
+          events_attended: response.data.total_events || 0,
+          lives_impacted: livesImpacted
+        });
+      }
+    } catch (error) {
+      console.error('Failed to fetch impact stats:', error);
+      // Keep default values on error
+    } finally {
+      setLoadingImpact(false);
     }
   };
   const handleCreatePost = async (e) => {
@@ -231,6 +269,8 @@ const Feed = () => {
             animate={{ opacity: 1, scale: 1 }}
             exit={{ opacity: 0, scale: 0.9 }}
             className="fixed top-24 left-1/2 transform -translate-x-1/2 z-40"
+            role="status"
+            aria-live="polite"
           >
             <Button
               onClick={handleRefresh}
@@ -438,7 +478,10 @@ const Feed = () => {
                               key={idx}
                               src={img}
                               alt={`Post image ${idx + 1}`}
-                              className="rounded-lg w-full h-48 object-cover shadow-md"
+                              className="rounded-lg w-full max-h-80 md:max-h-96 object-contain bg-muted/20 shadow-md"
+                              loading="lazy"
+                              decoding="async"
+                              sizes="(max-width: 640px) 100vw, 50vw"
                               whileHover={{ scale: 1.02, shadow: "0 10px 30px rgba(0,0,0,0.2)" }}
                               transition={{ duration: 0.2 }}
                             />
@@ -483,11 +526,11 @@ const Feed = () => {
                           likesCount={post.likes_count}
                           data-testid="feed-like-button"
                         />
-                        <Button variant="ghost" size="sm" data-testid="feed-comment-button">
+                        <Button variant="ghost" size="sm" data-testid="feed-comment-button" aria-label="View comments" className="min-h-[44px] min-w-[44px]">
                           <MessageCircle className="h-4 w-4 mr-2" />
                           {post.comments_count}
                         </Button>
-                        <Button variant="ghost" size="sm" data-testid="feed-share-button">
+                        <Button variant="ghost" size="sm" data-testid="feed-share-button" aria-label="Share post" className="min-h-[44px] min-w-[44px]">
                           <Share2 className="h-4 w-4 mr-2" />
                           Share
                         </Button>
@@ -497,9 +540,21 @@ const Feed = () => {
                 </motion.div>
               ))}
               {posts.length === 0 && (
-                <Card>
-                  <CardContent className="py-12 text-center">
-                    <p className="text-muted-foreground">No posts yet. Be the first to share something!</p>
+                <Card className="border-white/20">
+                  <CardContent className="py-16 text-center">
+                    <div className="space-y-4">
+                      <div className="text-6xl">📝</div>
+                      <h3 className="text-xl font-semibold">No posts yet</h3>
+                      <p className="text-muted-foreground max-w-md mx-auto">
+                        Be the first to share your volunteer journey and inspire others! Your story matters.
+                      </p>
+                      <Button 
+                        onClick={() => document.querySelector('[data-testid="post-textarea"]')?.focus()}
+                        className="mt-4"
+                      >
+                        Create Your First Post
+                      </Button>
+                    </div>
                   </CardContent>
                 </Card>
               )}
@@ -522,7 +577,16 @@ const Feed = () => {
                 </CardHeader>
                 <CardContent className="space-y-3">
                   {events.slice(0, 3).map((event) => (
-                    <div key={event.id} className="flex gap-3 p-3 rounded-xl hover:bg-white/5 transition-all duration-200 cursor-pointer group" data-testid="sidebar-event-item">
+                    <div 
+                      key={event.id} 
+                      onClick={() => navigate('/events')} 
+                      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); navigate('/events'); } }}
+                      role="link"
+                      tabIndex={0}
+                      aria-label={`View details for ${event.title} on Events page`}
+                      className="flex gap-3 p-3 rounded-xl hover:bg-white/5 transition-all duration-200 cursor-pointer group focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/50" 
+                      data-testid="sidebar-event-item"
+                    >
                       <div className="flex-shrink-0">
                         <div className="h-12 w-12 rounded-xl bg-gradient-to-br from-purple-500/20 to-pink-500/20 flex flex-col items-center justify-center group-hover:scale-110 transition-transform duration-200">
                           <span className="text-xs font-medium text-primary">
@@ -562,20 +626,32 @@ const Feed = () => {
                   </div>
                 </CardHeader>
                 <CardContent className="space-y-4">
-                  <div className="space-y-3">
-                    <div className="flex justify-between items-center p-3 rounded-xl bg-white/5">
-                      <span className="text-sm text-muted-foreground">Volunteer Hours</span>
-                      <span className="heading-font text-2xl font-bold text-primary">0</span>
+                  {loadingImpact ? (
+                    <div className="flex items-center justify-center py-8">
+                      <div className="animate-pulse text-sm text-muted-foreground">Loading impact stats...</div>
                     </div>
-                    <div className="flex justify-between items-center p-3 rounded-xl bg-white/5">
-                      <span className="text-sm text-muted-foreground">Events Attended</span>
-                      <span className="heading-font text-2xl font-bold text-[hsl(var(--brand-accent))]">0</span>
+                  ) : (
+                    <div className="space-y-3">
+                      <div className="flex justify-between items-center p-3 rounded-xl bg-white/5">
+                        <span className="text-sm text-muted-foreground">Volunteer Hours</span>
+                        <span className="heading-font text-2xl font-bold text-primary">
+                          {impactStats.volunteer_hours.toFixed(0)}
+                        </span>
+                      </div>
+                      <div className="flex justify-between items-center p-3 rounded-xl bg-white/5">
+                        <span className="text-sm text-muted-foreground">Events Attended</span>
+                        <span className="heading-font text-2xl font-bold text-[hsl(var(--brand-accent))]">
+                          {impactStats.events_attended}
+                        </span>
+                      </div>
+                      <div className="flex justify-between items-center p-3 rounded-xl bg-white/5">
+                        <span className="text-sm text-muted-foreground">Lives Impacted</span>
+                        <span className="heading-font text-2xl font-bold text-[hsl(var(--brand-support))]">
+                          {impactStats.lives_impacted}
+                        </span>
+                      </div>
                     </div>
-                    <div className="flex justify-between items-center p-3 rounded-xl bg-white/5">
-                      <span className="text-sm text-muted-foreground">Lives Impacted</span>
-                      <span className="heading-font text-2xl font-bold text-[hsl(var(--brand-support))]">0</span>
-                    </div>
-                  </div>
+                  )}
                 </CardContent>
               </Card>
             </motion.div>

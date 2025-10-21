@@ -35,15 +35,15 @@ export default function Impact() {
         return;
       }
       const dashboardRes = await axios.get(`${API_URL}/api/impact/dashboard/${ngoId}`, { withCredentials: true });
-      setDashboard(dashboardRes.data);
+      setDashboard(dashboardRes.data || {});
       const storiesRes = await axios.get(`${API_URL}/api/impact/stories`, { withCredentials: true });
-      setStories(storiesRes.data.stories);
+      setStories(storiesRes.data?.stories || []);
       const testimonialsRes = await axios.get(`${API_URL}/api/impact/testimonials`, { withCredentials: true });
-      setTestimonials(testimonialsRes.data.testimonials);
+      setTestimonials(testimonialsRes.data?.testimonials || []);
       const caseStudiesRes = await axios.get(`${API_URL}/api/impact/case-studies`, { withCredentials: true });
-      setCaseStudies(caseStudiesRes.data.case_studies);
+      setCaseStudies(caseStudiesRes.data?.case_studies || []);
       const outcomesRes = await axios.get(`${API_URL}/api/impact/outcomes?ngo_id=${ngoId}`, { withCredentials: true });
-      setOutcomes(outcomesRes.data.outcomes);
+      setOutcomes(outcomesRes.data?.outcomes || []);
     } catch (error) {
       console.error('Error fetching impact data:', error);
       toast.error('Failed to load impact data');
@@ -60,45 +60,65 @@ export default function Impact() {
       toast.error('Failed to like story');
     }
   };
-  const StatCard = ({ title, value, icon: Icon, description, color = "blue" }) => (
-    <Card>
-      <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-        <CardTitle className="text-sm font-medium">{title}</CardTitle>
-        <Icon className={`h-4 w-4 text-${color}-600`} />
-      </CardHeader>
-      <CardContent>
-        <div className="text-2xl font-bold">{value}</div>
-        {description && <p className="text-xs text-muted-foreground">{description}</p>}
-      </CardContent>
-    </Card>
-  );
+  const StatCard = ({ title, value, icon: Icon, description, color = "blue" }) => {
+    const colorClasses = {
+      blue: 'text-blue-600 dark:text-blue-400',
+      green: 'text-green-600 dark:text-green-400',
+      purple: 'text-purple-600 dark:text-purple-400',
+      red: 'text-red-600 dark:text-red-400'
+    };
+    
+    return (
+      <Card className="border-white/20 shadow-lg">
+        <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+          <CardTitle className="text-sm font-medium">{title}</CardTitle>
+          <Icon className={`h-4 w-4 ${colorClasses[color] || colorClasses.blue}`} />
+        </CardHeader>
+        <CardContent>
+          <div className="text-2xl font-bold heading-font">{value}</div>
+          {description && <p className="text-xs text-muted-foreground">{description}</p>}
+        </CardContent>
+      </Card>
+    );
+  };
   if (!user) {
     return (
-      <div className="flex items-center justify-center min-h-screen">
-        <Card className="p-8">
-          <p className="text-lg">Please log in to view impact metrics</p>
-        </Card>
+      <div className="min-h-screen bg-gradient-to-br from-purple-50/50 via-blue-50/30 to-indigo-50/50 dark:from-slate-900 dark:via-purple-950/30 dark:to-slate-900">
+        <Navigation />
+        <div className="flex items-center justify-center min-h-[80vh]">
+          <Card className="p-8 border-white/20 shadow-lg">
+            <CardContent className="text-center space-y-4">
+              <div className="text-5xl">🔒</div>
+              <p className="text-lg font-semibold">Authentication Required</p>
+              <p className="text-muted-foreground">Please log in to view your impact metrics</p>
+              <Button onClick={() => window.location.href = '/login'}>Log In</Button>
+            </CardContent>
+          </Card>
+        </div>
       </div>
     );
   }
   if (loading) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-50">
+      <div className="min-h-screen bg-gradient-to-br from-purple-50/50 via-blue-50/30 to-indigo-50/50 dark:from-slate-900 dark:via-purple-950/30 dark:to-slate-900">
         <Navigation />
         <div className="flex items-center justify-center min-h-[80vh]">
-          <div className="animate-pulse text-lg">Loading impact data...</div>
+          <div className="flex flex-col items-center gap-4">
+            <div className="h-12 w-12 border-4 border-primary/20 border-t-primary rounded-full animate-spin"></div>
+            <div className="text-lg text-foreground">Loading impact data...</div>
+          </div>
         </div>
       </div>
     );
   }
   return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-50">
+    <div className="min-h-screen bg-gradient-to-br from-purple-50/50 via-blue-50/30 to-indigo-50/50 dark:from-slate-900 dark:via-purple-950/30 dark:to-slate-900">
       <Navigation />
       <div className="max-w-7xl mx-auto px-4 py-8">
         {}
-        <div className="mb-8">
-          <h1 className="text-4xl font-bold text-gray-900 mb-2">Impact Dashboard</h1>
-          <p className="text-gray-600">Track and showcase your social impact</p>
+        <div className="mb-8 pt-24">
+          <h1 className="text-4xl font-bold mb-2 heading-font">Impact Dashboard</h1>
+          <p className="text-muted-foreground">Track and showcase your social impact</p>
         </div>
         {}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
@@ -133,7 +153,7 @@ export default function Impact() {
         </div>
         {}
         {dashboard?.metrics_by_type && Object.keys(dashboard.metrics_by_type).length > 0 && (
-          <Card className="mb-8">
+          <Card className="mb-8 border-white/20 shadow-lg">
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
                 <BarChart3 className="h-5 w-5" />
@@ -143,12 +163,12 @@ export default function Impact() {
             <CardContent>
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                 {Object.entries(dashboard.metrics_by_type).map(([type, data]) => (
-                  <div key={type} className="p-4 bg-gradient-to-br from-blue-50 to-indigo-50 rounded-lg">
+                  <div key={type} className="p-4 bg-gradient-to-br from-purple-500/10 to-pink-500/10 dark:from-purple-500/20 dark:to-pink-500/20 rounded-lg border border-white/10">
                     <h4 className="font-semibold capitalize mb-2">{type.replace('_', ' ')}</h4>
-                    <p className="text-2xl font-bold text-blue-600">
+                    <p className="text-2xl font-bold text-primary heading-font">
                       {data.total.toFixed(0)} {data.unit}
                     </p>
-                    <p className="text-sm text-gray-600">{data.count} entries</p>
+                    <p className="text-sm text-muted-foreground">{data.count} entries</p>
                   </div>
                 ))}
               </div>
